@@ -103,7 +103,7 @@ jobs:
 
       - name: Build scan matrix
         id: matrix
-        uses: tsumrad/gh-tools/.github/actions/build-ecosystem-matrix@main
+        uses: sumathi-thirumani/shared-gha-tools/.github/actions/build-ecosystem-matrix@feature/sbom-scanner
         with:
           mode: sbom
           path: ${{ steps.cfg.outputs.source_path }}
@@ -139,7 +139,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run SBOM core action
-        uses: tsumrad/gh-tools/.github/actions/sbom@main
+        uses: sumathi-thirumani/shared-gha-tools/.github/actions/sbom@feature/sbom-scanner
         with:
           source: ${{ matrix.source }}
           output_prefix: ${{ matrix.output_prefix }}
