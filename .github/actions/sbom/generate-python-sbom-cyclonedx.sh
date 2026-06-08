@@ -49,7 +49,7 @@ elif [[ -f "requirements.txt" ]]; then
     pip-audit \
         --requirement requirements.txt \
         --format cyclonedx-json \
-        > "$OUTPUT_FILE"
+        > "$OUTPUT_FILE" || true  # pip-audit exits with non-zero if vulnerabilities are found, but we still want the SBOM
 
 else
     echo "No supported dependency manifest found in $PROJECT_DIR" >&2
