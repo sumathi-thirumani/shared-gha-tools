@@ -1,0 +1,202 @@
+name: SBOM Generation Reusable
+
+on:
+  # Reusable entrypoint for repository workflows.
+  workflow_call:
+    secrets:
+      PAT:
+        description: Personal access token used for checkout when invoked as a reusable workflow
+        required: true
+    inputs:
+      # Scan target selection.
+      source_path: &source_path_input
+        description: Path to scan for filesystem SBOM generation
+        required: false
+        default: .
+        type: string
+      enable_filesystem_scan: &enable_filesystem_scan_input
+        description: Generate CycloneDX SBOMs from detected ecosystem directories
+        required: false
+        default: true
+        type: boolean
+
+      # Tooling.
+      syft_version: &syft_version_input
+        description: Pinned Syft version for deterministic behavior
+        required: false
+        default: v1.20.0
+        type: string
+
+      # Artifact publishing.
+      upload_artifacts: &upload_artifacts_input
+        description: Upload generated SBOMs as workflow artifacts
+        required: false
+        default: true
+        type: boolean
+      artifact_prefix: &artifact_prefix_input
+        description: Artifact prefix
+        required: false
+        default: sbom
+        type: string
+      artifact_retention_days: &artifact_retention_days_input
+        description: Artifact retention period in days
+        required: false
+        default: 30
+        type: number
+
+  # Optional manual trigger for testing this shared workflow directly.
+  workflow_dispatch:
+    inputs:
+      source_path: *source_path_input
+      enable_filesystem_scan: *enable_filesystem_scan_input
+      syft_version: *syft_version_input
+      upload_artifacts: *upload_artifacts_input
+      artifact_prefix: *artifact_prefix_input
+      artifact_retention_days: *artifact_retention_days_input
+
+permissions:
+  # Minimum required for checkout and source scanning.
+  contents: read
+  # Required to upload Trivy SARIF results to code scanning.
+  security-events: write
+
+jobs:
+  prepare-matrix:
+    name: Prepare SBOM Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      matrix_count: ${{ steps.matrix.outputs.matrix_count }}
+      syft_version: ${{ steps.cfg.outputs.syft_version }}
+      upload_artifacts: ${{ steps.cfg.outputs.upload_artifacts }}
+      artifact_prefix: ${{ steps.cfg.outputs.artifact_prefix }}
+      artifact_retention_days: ${{ steps.cfg.outputs.artifact_retention_days }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT || github.token }}
+          fetch-depth: 0
+
+      - name: Resolve inputs once
+        id: cfg
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_path=${{ inputs.source_path }}" >> "$GITHUB_OUTPUT"
+          echo "enable_filesystem_scan=${{ inputs.enable_filesystem_scan }}" >> "$GITHUB_OUTPUT"
+          echo "syft_version=${{ inputs.syft_version }}" >> "$GITHUB_OUTPUT"
+          echo "upload_artifacts=${{ inputs.upload_artifacts }}" >> "$GITHUB_OUTPUT"
+          echo "artifact_prefix=${{ inputs.artifact_prefix }}" >> "$GITHUB_OUTPUT"
+          echo "artifact_retention_days=${{ inputs.artifact_retention_days }}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate inputs only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ steps.cfg.outputs.enable_filesystem_scan }}" != "true" ]; then
+            echo "enable_filesystem_scan must be true." >&2
+            exit 1
+          fi
+
+      - name: Build scan matrix
+        id: matrix
+        uses: tsumrad/gh-tools/.github/actions/build-ecosystem-matrix@main
+        with:
+          mode: sbom
+          path: ${{ steps.cfg.outputs.source_path }}
+
+      - name: Summarize scan matrix
+        shell: bash
+        env:
+          DETECTED: ${{ steps.matrix.outputs.detected }}
+          TARGETS: ${{ steps.matrix.outputs.targets }}
+        run: |
+          set -euo pipefail
+          echo "### Scan Matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo "Entries: ${{ steps.matrix.outputs.matrix_count }}" >> "$GITHUB_STEP_SUMMARY"
+          detected_summary="$(jq -r 'join(", ")' <<< "$DETECTED")"
+          targets_summary="$(jq -r 'join(", ")' <<< "$TARGETS")"
+          echo "Detected ecosystems: $detected_summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "Selected targets: $targets_summary" >> "$GITHUB_STEP_SUMMARY"
+
+  generate-sbom:
+    name: Generate SBOM (${{ matrix.scan_label }})
+    runs-on: ubuntu-latest
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.matrix_count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT || github.token }}
+          fetch-depth: 0
+
+      - name: Run SBOM core action
+        uses: tsumrad/gh-tools/.github/actions/sbom@main
+        with:
+          source: ${{ matrix.source }}
+          output_prefix: ${{ matrix.output_prefix }}
+          syft_version: ${{ needs.prepare-matrix.outputs.syft_version }}
+          scan_label: ${{ matrix.scan_label }}
+
+      - name: Verify SBOM output
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lah
+          test -f "${{ matrix.output_prefix }}.cyclonedx.json"
+
+      - name: Scan SBOM for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: sbom
+          scan-ref: ${{ matrix.output_prefix }}.cyclonedx.json
+          format: sarif
+          output: ${{ matrix.output_prefix }}.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: 0
+
+      - name: Verify SARIF output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SARIF_FILE="${{ matrix.output_prefix }}.sarif"
+
+          if [ ! -f "$SARIF_FILE" ]; then
+            echo "SARIF output was not generated: $SARIF_FILE"
+            exit 1
+          fi
+
+          echo "Generated SARIF:"
+          ls -lh "$SARIF_FILE"
+
+      - name: Upload vulnerability SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ matrix.output_prefix }}.sarif
+          category: trivy-${{ matrix.scan_label }}
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results-${{ matrix.scan_label }}
+          path: ${{ matrix.output_prefix }}.sarif
+          if-no-files-found: error
+          retention-days: ${{ needs.prepare-matrix.outputs.artifact_retention_days }}
+
+      - name: Upload SBOM artifacts
+        if: needs.prepare-matrix.outputs.upload_artifacts == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare-matrix.outputs.artifact_prefix }}-${{ github.run_id }}-${{ matrix.scan_label }}
+          path: ${{ matrix.output_prefix }}.cyclonedx.json
+          if-no-files-found: error
+          retention-days: ${{ needs.prepare-matrix.outputs.artifact_retention_days }}

@@ -1,0 +1,21 @@
+# Dependabot configuration template.
+# Copy this file to .github/dependabot.yml in a repository and enable only the
+# package ecosystems that apply to that repository.
+#
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # GitHub Actions workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      github-actions-dependencies:
+        patterns:
+          - "*"
