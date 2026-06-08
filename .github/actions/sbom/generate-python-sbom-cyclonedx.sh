@@ -3,40 +3,60 @@ set -euo pipefail
 
 # Usage:
 #   generate-python-sbom-cyclonedx.sh <project_dir> <output_prefix>
+#
 # Produces:
 #   <output_prefix>.cyclonedx.json
 
 PROJECT_DIR="${1:?project directory is required}"
 OUTPUT_PREFIX="${2:?output prefix is required}"
+
 OUTPUT_FILE="$(cd "$(dirname "$OUTPUT_PREFIX")" && pwd)/$(basename "$OUTPUT_PREFIX").cyclonedx.json"
 
-if [ ! -d "$PROJECT_DIR" ]; then
-  echo "Python project directory does not exist: $PROJECT_DIR" >&2
-  exit 1
+if [[ ! -d "$PROJECT_DIR" ]]; then
+    echo "Python project directory does not exist: $PROJECT_DIR" >&2
+    exit 1
 fi
 
-python -m pip install --upgrade pip
-pip install cyclonedx-bom poetry
+# Pin versions for reproducibility
+python -m pip install --disable-pip-version-check \
+    "cyclonedx-bom==4.1.6" \
+    "pip-audit==2.9.0" \
+    "poetry==2.2.1"
 
 pushd "$PROJECT_DIR" >/dev/null
+trap 'popd >/dev/null 2>&1 || true' EXIT
 
-if [ -f "poetry.lock" ] || grep -q "\[tool.poetry\]" pyproject.toml 2>/dev/null; then
-  echo "Poetry project detected"
+if [[ -f "pyproject.toml" ]] && grep -q '\[tool\.poetry\]' pyproject.toml; then
+    echo "Detected Poetry project"
 
-  [ -f poetry.lock ] || poetry lock
-  poetry install --no-interaction
-  poetry run cyclonedx-py environment --output-format JSON --output-file "$OUTPUT_FILE"
-elif [ -f "requirements.txt" ]; then
-  echo "requirements.txt project detected"
+    if [[ ! -f "poetry.lock" ]]; then
+        echo "poetry.lock is required for reproducible SBOM generation" >&2
+        exit 1
+    fi
 
-  python -m venv .venv
-  # shellcheck disable=SC1091
-  source .venv/bin/activate
-  pip install -r requirements.txt
-  cyclonedx-py environment --output-format JSON --output-file "$OUTPUT_FILE"
+    poetry install \
+        --no-root \
+        --no-interaction \
+        --sync
+
+    poetry run cyclonedx-py environment \
+        --output-format JSON \
+        --output-file "$OUTPUT_FILE"
+
+elif [[ -f "requirements.txt" ]]; then
+    echo "Detected requirements.txt project"
+
+    pip-audit \
+        --requirement requirements.txt \
+        --format cyclonedx-json \
+        > "$OUTPUT_FILE"
+
 else
-  echo "No supported Python dependency manifest found in $PROJECT_DIR" >&2
-  exit 1
+    echo "No supported dependency manifest found in $PROJECT_DIR" >&2
+    echo "Expected one of:" >&2
+    echo "  - pyproject.toml (Poetry project)" >&2
+    echo "  - requirements.txt" >&2
+    exit 1
 fi
 
-popd >/dev/null
+echo "SBOM written to: $OUTPUT_FILE"
