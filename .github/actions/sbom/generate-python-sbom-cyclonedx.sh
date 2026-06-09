@@ -10,23 +10,34 @@ set -euo pipefail
 PROJECT_DIR="${1:?project directory is required}"
 OUTPUT_PREFIX="${2:?output prefix is required}"
 
-OUTPUT_FILE="$(cd "$(dirname "$OUTPUT_PREFIX")" && pwd)/$(basename "$OUTPUT_PREFIX").cyclonedx.json"
+OUTPUT_FILE="$(mkdir -p "$(dirname "$OUTPUT_PREFIX")" && \
+    cd "$(dirname "$OUTPUT_PREFIX")" && pwd)/$(basename "$OUTPUT_PREFIX").cyclonedx.json"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
-    echo "Python project directory does not exist: $PROJECT_DIR" >&2
+    echo "Project directory does not exist: $PROJECT_DIR" >&2
     exit 1
 fi
 
-# Pin versions for reproducibility
-python -m pip install --disable-pip-version-check \
-    "cyclonedx-bom==4.1.6" \
-    "pip-audit==2.9.0" \
+TOOL_VENV="$(mktemp -d)"
+cleanup() {
+    rm -rf "$TOOL_VENV"
+}
+trap cleanup EXIT
+
+python -m venv "$TOOL_VENV"
+
+# shellcheck disable=SC1091
+source "$TOOL_VENV/bin/activate"
+
+python -m pip install \
+    --disable-pip-version-check \
+    --quiet \
+    "cyclonedx-bom==7.3.0" \
     "poetry==2.2.1"
 
 pushd "$PROJECT_DIR" >/dev/null
-trap 'popd >/dev/null 2>&1 || true' EXIT
 
-if [[ -f "pyproject.toml" ]] && grep -q '\[tool\.poetry\]' pyproject.toml; then
+if [[ -f "pyproject.toml" ]] && grep -q '^\[tool\.poetry\]$' pyproject.toml; then
     echo "Detected Poetry project"
 
     if [[ ! -f "poetry.lock" ]]; then
@@ -34,22 +45,36 @@ if [[ -f "pyproject.toml" ]] && grep -q '\[tool\.poetry\]' pyproject.toml; then
         exit 1
     fi
 
-    poetry install \
-        --no-root \
-        --no-interaction \
-        --sync
-
-    poetry run cyclonedx-py environment \
+    cyclonedx-py poetry \
         --output-format JSON \
         --output-file "$OUTPUT_FILE"
 
 elif [[ -f "requirements.txt" ]]; then
     echo "Detected requirements.txt project"
 
-    pip-audit \
-        --requirement requirements.txt \
-        --format cyclonedx-json \
-        > "$OUTPUT_FILE" || true  # pip-audit exits with non-zero if vulnerabilities are found, but we still want the SBOM
+    PROJECT_VENV="$(mktemp -d)"
+
+    cleanup_project_venv() {
+        rm -rf "$PROJECT_VENV"
+    }
+    trap 'cleanup_project_venv; cleanup' EXIT
+
+    python -m venv "$PROJECT_VENV"
+
+    # shellcheck disable=SC1091
+    source "$PROJECT_VENV/bin/activate"
+
+    python -m pip install \
+        --disable-pip-version-check \
+        --upgrade pip
+
+    python -m pip install \
+        --disable-pip-version-check \
+        -r requirements.txt
+
+    cyclonedx-py environment \
+        --output-format JSON \
+        --output-file "$OUTPUT_FILE"
 
 else
     echo "No supported dependency manifest found in $PROJECT_DIR" >&2
@@ -58,5 +83,7 @@ else
     echo "  - requirements.txt" >&2
     exit 1
 fi
+
+popd >/dev/null
 
 echo "SBOM written to: $OUTPUT_FILE"
