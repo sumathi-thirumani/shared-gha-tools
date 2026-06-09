@@ -3,87 +3,121 @@ set -euo pipefail
 
 # Usage:
 #   generate-python-sbom-cyclonedx.sh <project_dir> <output_prefix>
-#
-# Produces:
-#   <output_prefix>.cyclonedx.json
 
 PROJECT_DIR="${1:?project directory is required}"
 OUTPUT_PREFIX="${2:?output prefix is required}"
 
-OUTPUT_FILE="$(mkdir -p "$(dirname "$OUTPUT_PREFIX")" && \
-    cd "$(dirname "$OUTPUT_PREFIX")" && pwd)/$(basename "$OUTPUT_PREFIX").cyclonedx.json"
+CYCLONEDX_BOM_VERSION="${CYCLONEDX_BOM_VERSION:-7.3.0}"
+POETRY_VERSION="${POETRY_VERSION:-2.2.1}"
 
-if [[ ! -d "$PROJECT_DIR" ]]; then
-    echo "Project directory does not exist: $PROJECT_DIR" >&2
-    exit 1
-fi
+log() {
+  echo "[python-sbom] $*"
+}
+
+die() {
+  echo "[python-sbom] ERROR: $*" >&2
+  exit 1
+}
+
+is_poetry_project() {
+  [ -f "poetry.lock" ] || grep -q '^\[tool\.poetry\]' pyproject.toml 2>/dev/null
+}
+
+ensure_poetry_lock() {
+  if [ ! -f "poetry.lock" ]; then
+    log "poetry.lock not found; generating lock file"
+    "$TOOL_POETRY" lock --no-interaction
+  fi
+}
+
+verify_sbom() {
+  local sbom_file="$1"
+  local python_bin="$2"
+
+  [ -f "$sbom_file" ] || die "SBOM output missing: $sbom_file"
+
+  local component_count
+  component_count="$("$python_bin" - "$sbom_file" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+
+print(len(data.get("components") or []))
+PY
+)"
+
+  if [ "$component_count" -eq 0 ]; then
+    die "SBOM contains zero components: $sbom_file"
+  fi
+
+  log "SBOM contains $component_count components"
+}
+
+[ -d "$PROJECT_DIR" ] || die "Project directory does not exist: $PROJECT_DIR"
+
+mkdir -p "$(dirname "$OUTPUT_PREFIX")"
+
+OUTPUT_FILE="$(cd "$(dirname "$OUTPUT_PREFIX")" && pwd)/$(basename "$OUTPUT_PREFIX").cyclonedx.json"
 
 TOOL_VENV="$(mktemp -d)"
+PROJECT_VENV=""
+
 cleanup() {
-    rm -rf "$TOOL_VENV"
+  rm -rf "$TOOL_VENV"
+  [ -n "${PROJECT_VENV}" ] && rm -rf "$PROJECT_VENV"
 }
 trap cleanup EXIT
 
+log "Installing SBOM tooling"
+
 python -m venv "$TOOL_VENV"
+TOOL_PYTHON="$TOOL_VENV/bin/python"
 
-# shellcheck disable=SC1091
-source "$TOOL_VENV/bin/activate"
+"$TOOL_PYTHON" -m pip install --disable-pip-version-check --quiet \
+  "cyclonedx-bom==$CYCLONEDX_BOM_VERSION" \
+  "poetry==$POETRY_VERSION"
 
-python -m pip install \
-    --disable-pip-version-check \
-    --quiet \
-    "cyclonedx-bom==7.3.0" \
-    "poetry==2.2.1"
+TOOL_POETRY="$TOOL_VENV/bin/poetry"
 
 pushd "$PROJECT_DIR" >/dev/null
 
-if [[ -f "pyproject.toml" ]] && grep -q '^\[tool\.poetry\]$' pyproject.toml; then
-    echo "Detected Poetry project"
+if is_poetry_project; then
+  log "Detected Poetry project"
 
-    if [[ ! -f "poetry.lock" ]]; then
-        echo "poetry.lock is required for reproducible SBOM generation" >&2
-        exit 1
-    fi
+  ensure_poetry_lock
 
-    cyclonedx-py poetry \
-        --output-format JSON \
-        --output-file "$OUTPUT_FILE"
+  log "Generating SBOM from Poetry metadata"
 
-elif [[ -f "requirements.txt" ]]; then
-    echo "Detected requirements.txt project"
+  "$TOOL_PYTHON" -m cyclonedx_py poetry \
+    --output-format JSON \
+    --output-file "$OUTPUT_FILE"
 
-    PROJECT_VENV="$(mktemp -d)"
+elif [ -f "requirements.txt" ]; then
+  log "Detected requirements.txt project"
 
-    cleanup_project_venv() {
-        rm -rf "$PROJECT_VENV"
-    }
-    trap 'cleanup_project_venv; cleanup' EXIT
+  PROJECT_VENV="$(mktemp -d)"
+  python -m venv "$PROJECT_VENV"
 
-    python -m venv "$PROJECT_VENV"
+  PROJECT_PYTHON="$PROJECT_VENV/bin/python"
 
-    # shellcheck disable=SC1091
-    source "$PROJECT_VENV/bin/activate"
+  log "Installing requirements"
 
-    python -m pip install \
-        --disable-pip-version-check \
-        --upgrade pip
+  "$PROJECT_PYTHON" -m pip install --disable-pip-version-check --quiet --upgrade pip
+  "$PROJECT_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements.txt
 
-    python -m pip install \
-        --disable-pip-version-check \
-        -r requirements.txt
+  log "Generating SBOM from installed environment"
 
-    cyclonedx-py environment \
-        --output-format JSON \
-        --output-file "$OUTPUT_FILE"
-
+  "$TOOL_PYTHON" -m cyclonedx_py environment \
+    "$PROJECT_PYTHON" \
+    --output-format JSON \
+    --output-file "$OUTPUT_FILE"
 else
-    echo "No supported dependency manifest found in $PROJECT_DIR" >&2
-    echo "Expected one of:" >&2
-    echo "  - pyproject.toml (Poetry project)" >&2
-    echo "  - requirements.txt" >&2
-    exit 1
+  die "No supported dependency manifest found (poetry.lock, pyproject.toml, or requirements.txt)"
 fi
 
 popd >/dev/null
 
-echo "SBOM written to: $OUTPUT_FILE"
+verify_sbom "$OUTPUT_FILE" "$TOOL_PYTHON"
+
+log "SBOM written to: $OUTPUT_FILE"
