@@ -15,5 +15,5 @@ OUTPUT_FILE="${OUTPUT_PREFIX}.cyclonedx.json"
 echo "[sbom] Generating SBOM from source: ${SOURCE}"
 echo "[sbom] SBOM output path: ${OUTPUT_FILE}"
 
-syft "${SOURCE}" \
+syft . \
   --output "cyclonedx-json=${OUTPUT_FILE}"
