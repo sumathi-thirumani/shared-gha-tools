@@ -10,10 +10,26 @@ set -euo pipefail
 
 SOURCE="${1:?source is required}"
 OUTPUT_PREFIX="${2:?output prefix is required}"
-OUTPUT_FILE="${OUTPUT_PREFIX}.cyclonedx.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "[sbom] Generating SBOM from source: ${SOURCE}"
-echo "[sbom] SBOM output path: ${OUTPUT_FILE}"
+source_directory() {
+  case "$SOURCE" in
+    dir:*) printf '%s\n' "${SOURCE#dir:}" ;;
+    *) return 1 ;;
+  esac
+}
 
-syft . \
-  --output "cyclonedx-json=${OUTPUT_FILE}"
+has_python_dependency_manifest() {
+  local project_dir="$1"
+
+  [ -f "$project_dir/poetry.lock" ] ||
+    [ -f "$project_dir/requirements.txt" ] ||
+    grep -q "\[tool.poetry\]" "$project_dir/pyproject.toml" 2>/dev/null
+}
+
+if project_dir="$(source_directory)" && has_python_dependency_manifest "$project_dir"; then
+  bash "$SCRIPT_DIR/generate-python-sbom-cyclonedx.sh" "$project_dir" "$OUTPUT_PREFIX"
+else
+  syft "${SOURCE}" \
+    --output "cyclonedx-json=${OUTPUT_PREFIX}.cyclonedx.json"
+fi
