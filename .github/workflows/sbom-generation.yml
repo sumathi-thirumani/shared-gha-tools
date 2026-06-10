@@ -24,7 +24,7 @@ on:
       syft_version: &syft_version_input
         description: Pinned Syft version for deterministic behavior
         required: false
-        default: v1.20.0
+        default: v1.45.0
         type: string
 
       # Artifact publishing.
