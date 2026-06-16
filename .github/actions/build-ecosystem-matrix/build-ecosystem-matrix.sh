@@ -21,12 +21,14 @@ SOURCE_PATH="${2:-.}"
 SUPPORTED_CSV="${3:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Detect ecosystems once so all modes use the same scan results.
 ecosystem_json="$(bash "$SCRIPT_DIR/detect-ecosystems.sh" "$SOURCE_PATH")"
-detected="$(jq -c '.list' <<< "$ecosystem_json")"
+detected="$(jq -c '.list' <<<"$ecosystem_json")"
 
+# Convert a comma-separated ecosystem allowlist to JSON.
 build_supported_json() {
-  local csv="$1"
-  jq -cn --arg supported "$csv" '
+	local csv="$1"
+	jq -cn --arg supported "$csv" '
     $supported
     | split(",")
     | map(gsub("^\\s+|\\s+$"; ""))
@@ -35,16 +37,20 @@ build_supported_json() {
 }
 
 case "$MODE" in
-  audit)
-    supported_json="$(build_supported_json "${SUPPORTED_CSV:-node,python}")"
-    entries="$(jq -c --argjson supported "$supported_json" '
+audit)
+	# Audit jobs run per supported ecosystem.
+	supported_json="$(build_supported_json "${SUPPORTED_CSV:-node,python}")"
+	entries="$(jq -c --argjson supported "$supported_json" '
       [.list[] | select(. as $e | $supported | index($e) != null) | {ecosystem:.}]
-    ' <<< "$ecosystem_json")"
-    targets="$(jq -c '[.[].ecosystem]' <<< "$entries")"
-    ;;
+    ' <<<"$ecosystem_json")"
+	# Targets summarize the selected ecosystems.
+	targets="$(jq -c '[.[].ecosystem]' <<<"$entries")"
+	;;
 
-  sbom)
-    entries="$(jq -c --arg sourcePath "$SOURCE_PATH" '
+sbom)
+	# SBOM jobs run per manifest directory.
+	entries="$(jq -c --arg sourcePath "$SOURCE_PATH" '
+      # Create workflow-safe label segments.
       def slug:
         if . == "." then "root"
         else
@@ -53,6 +59,7 @@ case "$MODE" in
           | gsub("^-+|-+$"; "")
           | if length == 0 then "root" else . end
         end;
+      # Keep labels relative to the configured scan root.
       def relative_to_root($root):
         if . == $root then "."
         elif ($root != "." and startswith($root + "/")) then ltrimstr($root + "/")
@@ -61,12 +68,15 @@ case "$MODE" in
 
       if .any then
         [.findings
+          # group_by requires adjacent keys, so sort by path before grouping.
+          | sort_by(.path)
           | group_by(.path)[]
           | {
               path: .[0].path,
               label_path: (.[0].path | relative_to_root($sourcePath)),
               ecosystems: (map(.ecosystem) | unique)
             }
+          # Include ecosystem names and path to avoid label collisions.
           | .label = ("filesystem-" + (.ecosystems | join("-")) + "-" + (.label_path | slug))
           | {
               scan_kind: "filesystem",
@@ -76,6 +86,7 @@ case "$MODE" in
               ecosystems: .ecosystems
             }]
       else
+        # Fall back to one generic filesystem scan when no manifests match.
         [{
           scan_kind: "filesystem",
           scan_label: "filesystem-generic",
@@ -84,22 +95,24 @@ case "$MODE" in
           ecosystems: []
         }]
       end
-    ' <<< "$ecosystem_json")"
-    targets="$(jq -c '[.[].scan_label]' <<< "$entries")"
-    ;;
+    ' <<<"$ecosystem_json")"
+	# Targets summarize generated scan labels.
+	targets="$(jq -c '[.[].scan_label]' <<<"$entries")"
+	;;
 
-  *)
-    echo "Unsupported mode: $MODE (expected audit or sbom)" >&2
-    exit 1
-    ;;
+*)
+	echo "Unsupported mode: $MODE (expected audit or sbom)" >&2
+	exit 1
+	;;
 esac
 
-count="$(jq -r 'length' <<< "$entries")"
-matrix="$(jq -c --argjson include "$entries" '{include:$include}' <<< '{}')"
+count="$(jq -r 'length' <<<"$entries")"
+matrix="$(jq -c --argjson include "$entries" '{include:$include}' <<<'{}')"
 
+# Emit the normalized GitHub Actions output payload.
 jq -cn \
-  --argjson detected "$detected" \
-  --argjson targets "$targets" \
-  --argjson count "$count" \
-  --argjson matrix "$matrix" \
-  '{detected:$detected, targets:$targets, count:$count, matrix:$matrix}'
+	--argjson detected "$detected" \
+	--argjson targets "$targets" \
+	--argjson count "$count" \
+	--argjson matrix "$matrix" \
+	'{detected:$detected, targets:$targets, count:$count, matrix:$matrix}'

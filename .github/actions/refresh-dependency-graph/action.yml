@@ -1,0 +1,57 @@
+name: Refresh Dependency Graph
+description: Normalize and submit a GitHub dependency graph snapshot for an SBOM scan.
+
+inputs:
+  source:
+    description: Syft source, for example dir:.
+    required: true
+  output_prefix:
+    description: Output file prefix without extension.
+    required: true
+  scan_label:
+    description: Unique label for the scan target.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Force refresh GitHub Dependency Graph
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        # Use the SBOM output prefix so each matrix target has isolated files.
+        SNAPSHOT_FILE="${{ inputs.output_prefix }}.github.json"
+        NORMALIZED_SNAPSHOT_FILE="${{ inputs.output_prefix }}.github.normalized.json"
+        CYCLONEDX_FILE="${{ inputs.output_prefix }}.cyclonedx.json"
+        SOURCE="${{ inputs.source }}"
+        ACTION_PATH="${{ github.action_path }}"
+
+        if [ ! -f "$CYCLONEDX_FILE" ]; then
+          echo "CycloneDX SBOM missing: $CYCLONEDX_FILE" >&2
+          exit 1
+        fi
+
+        # Generate GitHub snapshot format from the CycloneDX SBOM.
+        python3 "$ACTION_PATH/generate-cyclonedx-snapshot.py" \
+          "$CYCLONEDX_FILE" \
+          "$SOURCE" \
+          "$SNAPSHOT_FILE"
+
+        # Stamp workflow identity fields required by Dependency Graph snapshots.
+        jq \
+          --arg ref "$GITHUB_REF" \
+          --arg sha "$GITHUB_SHA" \
+          --arg scanned "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+          --arg job_id "$GITHUB_JOB" \
+          --arg correlator "sbom-${{ inputs.scan_label }}" \
+          '.ref = $ref | .sha = $sha | .scanned = (.scanned // $scanned) | .job.id = $job_id | .job.correlator = $correlator' \
+          "$SNAPSHOT_FILE" > "$NORMALIZED_SNAPSHOT_FILE"
+
+        # Submit the normalized snapshot to refresh dependency graph data.
+        gh api \
+          --method POST \
+          "repos/${GITHUB_REPOSITORY}/dependency-graph/snapshots" \
+          --input "$NORMALIZED_SNAPSHOT_FILE"
