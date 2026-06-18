@@ -39,7 +39,7 @@ build_supported_json() {
 case "$MODE" in
 audit)
 	# Audit jobs run per supported ecosystem.
-	supported_json="$(build_supported_json "${SUPPORTED_CSV:-node,python}")"
+	supported_json="$(build_supported_json "${SUPPORTED_CSV:-java,python,dotnet,node}")"
 	entries="$(jq -c --argjson supported "$supported_json" '
       [.list[] | select(. as $e | $supported | index($e) != null) | {ecosystem:.}]
     ' <<<"$ecosystem_json")"
