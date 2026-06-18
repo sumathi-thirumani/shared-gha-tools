@@ -4,7 +4,7 @@ set -euo pipefail
 # Usage:
 #   normalize-sbom.sh <output_prefix> <created_at> <serial>
 # Example:
-#   normalize-sbom.sh "sbom/filesystem" "2026-01-01T00:00:00Z" "urn:uuid:..."
+#   normalize-sbom.sh "filesystem" "2026-01-01T00:00:00Z" "urn:uuid:..."
 
 OUTPUT_PREFIX="${1:?output_prefix is required}"
 CREATED_AT="${2:?created_at is required}"

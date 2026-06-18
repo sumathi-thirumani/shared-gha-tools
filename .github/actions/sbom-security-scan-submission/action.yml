@@ -1,0 +1,56 @@
+name: SBOM Scan Submission
+description: Scan a CycloneDX SBOM with Trivy and upload SARIF results.
+
+inputs:
+  output_prefix:
+    description: Output file prefix without extension.
+    required: true
+  scan_label:
+    description: Label used to categorize uploaded SARIF results.
+    required: true
+  trivy_cache_dir:
+    description: Trivy cache directory.
+    required: false
+    default: .trivy-cache
+
+runs:
+  using: composite
+  steps:
+    - name: Scan SBOM for vulnerabilities
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+      env:
+        TRIVY_CACHE_DIR: ${{ inputs.trivy_cache_dir }}
+      with:
+        # Scan the generated inventory rather than source files so findings
+        # correspond exactly to the CycloneDX SBOM produced above.
+        scan-type: sbom
+        scan-ref: ${{ inputs.output_prefix }}.cyclonedx.json
+        format: sarif
+        output: ${{ inputs.output_prefix }}.sarif
+        severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+        exit-code: 0
+
+    - name: Verify SARIF output
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Ensure upload steps fail with a clear error when Trivy does not
+        # produce the SARIF file expected by code scanning.
+        SARIF_FILE="${{ inputs.output_prefix }}.sarif"
+
+        if [ ! -f "$SARIF_FILE" ]; then
+          echo "SARIF output was not generated: $SARIF_FILE"
+          exit 1
+        fi
+
+        echo "Generated SARIF:"
+        ls -lh "$SARIF_FILE"
+
+    - name: Upload vulnerability SARIF
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        # Upload Trivy findings to GitHub code scanning. The category includes
+        # the scan label so each matrix target keeps a separate result set.
+        sarif_file: ${{ inputs.output_prefix }}.sarif
+        category: trivy-${{ inputs.scan_label }}

@@ -1,57 +1,57 @@
 name: Refresh Dependency Graph
-description: Normalize and submit a GitHub dependency graph snapshot for an SBOM scan.
-
+description: Submit dependencies to GitHub Dependency Graph
 inputs:
-  source:
-    description: Syft source, for example dir:.
-    required: true
-  output_prefix:
-    description: Output file prefix without extension.
+  ecosystems:
+    description: Comma-separated list of ecosystems detected (e.g., "python,node")
     required: true
   scan_label:
-    description: Unique label for the scan target.
+    description: Unique label for this scan target
     required: true
-
+  source_dir:
+    description: Source directory to scan
+    required: false
+    default: "."
 runs:
   using: composite
   steps:
-    - name: Force refresh GitHub Dependency Graph
+    - name: Determine component detection inputs
+      id: method
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        ECOSYSTEMS: ${{ inputs.ecosystems }}
+        SOURCE_DIR: ${{ inputs.source_dir }}
       run: |
         set -euo pipefail
+        if [[ "$SOURCE_DIR" == dir:* ]]; then
+          CLEAN_DIR="${SOURCE_DIR#dir:}"
+        else
+          CLEAN_DIR="$SOURCE_DIR"
+        fi
+        echo "clean_dir=$CLEAN_DIR" >> "$GITHUB_OUTPUT"
+        echo "Scanning directory: $CLEAN_DIR"
 
-        # Use the SBOM output prefix so each matrix target has isolated files.
-        SNAPSHOT_FILE="${{ inputs.output_prefix }}.github.json"
-        NORMALIZED_SNAPSHOT_FILE="${{ inputs.output_prefix }}.github.normalized.json"
-        CYCLONEDX_FILE="${{ inputs.output_prefix }}.cyclonedx.json"
-        SOURCE="${{ inputs.source }}"
-        ACTION_PATH="${{ github.action_path }}"
-
-        if [ ! -f "$CYCLONEDX_FILE" ]; then
-          echo "CycloneDX SBOM missing: $CYCLONEDX_FILE" >&2
-          exit 1
+        if [[ "$ECOSYSTEMS" =~ python ]] && [ -f "$CLEAN_DIR/poetry.lock" ]; then
+          echo "has_poetry_lock=true" >> "$GITHUB_OUTPUT"
+          echo "Using component detection with Poetry detector enabled"
+        else
+          echo "has_poetry_lock=false" >> "$GITHUB_OUTPUT"
+          echo "Using component detection"
         fi
 
-        # Generate GitHub snapshot format from the CycloneDX SBOM.
-        python3 "$ACTION_PATH/generate-cyclonedx-snapshot.py" \
-          "$CYCLONEDX_FILE" \
-          "$SOURCE" \
-          "$SNAPSHOT_FILE"
+    ############################################################
+    # Dependency submission
+    ############################################################
+    - name: Submit Poetry component detection dependency snapshot
+      if: steps.method.outputs.has_poetry_lock == 'true'
+      uses: advanced-security/component-detection-dependency-submission-action@main
+      with:
+        filePath: ${{ steps.method.outputs.clean_dir }}
+        correlator: refresh-dependency-graph-${{ inputs.scan_label }}
+        detectorArgs: Poetry=EnableIfDefaultOff
 
-        # Stamp workflow identity fields required by Dependency Graph snapshots.
-        jq \
-          --arg ref "$GITHUB_REF" \
-          --arg sha "$GITHUB_SHA" \
-          --arg scanned "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-          --arg job_id "$GITHUB_JOB" \
-          --arg correlator "sbom-${{ inputs.scan_label }}" \
-          '.ref = $ref | .sha = $sha | .scanned = (.scanned // $scanned) | .job.id = $job_id | .job.correlator = $correlator' \
-          "$SNAPSHOT_FILE" > "$NORMALIZED_SNAPSHOT_FILE"
-
-        # Submit the normalized snapshot to refresh dependency graph data.
-        gh api \
-          --method POST \
-          "repos/${GITHUB_REPOSITORY}/dependency-graph/snapshots" \
-          --input "$NORMALIZED_SNAPSHOT_FILE"
+    - name: Submit component detection dependency snapshot
+      if: steps.method.outputs.has_poetry_lock != 'true'
+      uses: advanced-security/component-detection-dependency-submission-action@main
+      with:
+        filePath: ${{ steps.method.outputs.clean_dir }}
+        correlator: refresh-dependency-graph-${{ inputs.scan_label }}
