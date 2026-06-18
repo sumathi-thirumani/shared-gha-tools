@@ -30,10 +30,16 @@ runs:
         echo "clean_dir=$CLEAN_DIR" >> "$GITHUB_OUTPUT"
         echo "Scanning directory: $CLEAN_DIR"
 
-        if [[ "$ECOSYSTEMS" =~ python ]] && [ -f "$CLEAN_DIR/poetry.lock" ]; then
+        if [[ ",$ECOSYSTEMS," == *",container,"* ]]; then
+          echo "should_submit=false" >> "$GITHUB_OUTPUT"
+          echo "has_poetry_lock=false" >> "$GITHUB_OUTPUT"
+          echo "Skipping dependency graph submission for container ecosystem"
+        elif [[ "$ECOSYSTEMS" =~ python ]] && [ -f "$CLEAN_DIR/poetry.lock" ]; then
+          echo "should_submit=true" >> "$GITHUB_OUTPUT"
           echo "has_poetry_lock=true" >> "$GITHUB_OUTPUT"
           echo "Using component detection with Poetry detector enabled"
         else
+          echo "should_submit=true" >> "$GITHUB_OUTPUT"
           echo "has_poetry_lock=false" >> "$GITHUB_OUTPUT"
           echo "Using component detection"
         fi
@@ -42,7 +48,7 @@ runs:
     # Dependency submission
     ############################################################
     - name: Submit Poetry component detection dependency snapshot
-      if: steps.method.outputs.has_poetry_lock == 'true'
+      if: steps.method.outputs.should_submit == 'true' && steps.method.outputs.has_poetry_lock == 'true'
       uses: advanced-security/component-detection-dependency-submission-action@main
       with:
         filePath: ${{ steps.method.outputs.clean_dir }}
@@ -50,7 +56,7 @@ runs:
         detectorArgs: Poetry=EnableIfDefaultOff
 
     - name: Submit component detection dependency snapshot
-      if: steps.method.outputs.has_poetry_lock != 'true'
+      if: steps.method.outputs.should_submit == 'true' && steps.method.outputs.has_poetry_lock != 'true'
       uses: advanced-security/component-detection-dependency-submission-action@main
       with:
         filePath: ${{ steps.method.outputs.clean_dir }}
